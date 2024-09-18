@@ -12,6 +12,7 @@ import org.gradle.api.invocation.Gradle
 import org.gradle.api.logging.LogLevel
 import org.gradle.api.logging.configuration.ConsoleOutput
 import org.gradle.api.logging.configuration.ShowStacktrace
+import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Exec
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.TaskState
@@ -19,13 +20,14 @@ import org.gradle.process.internal.ExecAction
 import org.gradle.process.internal.ExecActionFactory
 import org.gradle.process.internal.ExecException
 import org.gradle.tooling.GradleConnector
-import org.gradle.workers.IsolationMode
+import org.gradle.workers.WorkAction
+import org.gradle.workers.WorkParameters
 import org.gradle.workers.WorkerExecutor
 import java.io.File
 import java.io.OutputStream
 import java.io.OutputStreamWriter
 import java.nio.file.Files
-import java.util.*
+import java.util.Properties
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 import javax.inject.Inject
@@ -203,13 +205,14 @@ open class Mirakle : Plugin<Gradle> {
 
                             //It's impossible to pass this as serializable params to worker
                             //God forgive us
-                            DownloadInParallelWorker.downloadExecAction = downloadExecAction
-                            DownloadInParallelWorker.gradle = gradle
+                            DownloadInParallelAction.downloadExecAction = downloadExecAction
+                            DownloadInParallelAction.gradle = gradle
 
-                            services.get(WorkerExecutor::class.java).submit(DownloadInParallelWorker::class.java) {
-                                it.isolationMode = IsolationMode.NONE
-                                it.setParams(config.downloadInterval)
-                            }
+                            services.get(WorkerExecutor::class.java)
+                                .noIsolation()
+                                .submit(DownloadInParallelAction::class.java) { params: DownloadInParallelActionParams ->
+                                    params.getDownloadInterval().value(config.downloadInterval)
+                                }
                         }
 
                         onlyIf {
@@ -313,7 +316,10 @@ open class Mirakle : Plugin<Gradle> {
 
                                         if (inputsNotInProjectDir.isNotEmpty()) {
                                             throw MirakleException(
-                                                "${breakTask.toString().capitalize()} declares input not from project dir. That is not supported by Mirakle yet. Tasks:\n${inputsNotInProjectDir.joinToString { it.path }}"
+                                                "${
+                                                    breakTask.toString()
+                                                        .capitalize()
+                                                } declares input not from project dir. That is not supported by Mirakle yet. Tasks:\n${inputsNotInProjectDir.joinToString { it.path }}"
                                             )
                                         }
 
@@ -376,9 +382,14 @@ open class Mirakle : Plugin<Gradle> {
 }
 
 open class ExecuteOnRemoteTask : Exec() {
-    @Internal lateinit var config: MirakleExtension
-    @Internal lateinit var gradlewRoot: File
-    @Internal lateinit var startParams: StartParameter
+    @Internal
+    lateinit var config: MirakleExtension
+
+    @Internal
+    lateinit var gradlewRoot: File
+
+    @Internal
+    lateinit var startParams: StartParameter
     private val tasksList = mutableListOf<String>()
     private val additionalArgs = mutableListOf<String>()
 
@@ -493,13 +504,21 @@ fun startParamsToArgs(params: StartParameter) = with(params) {
         .plus(excludedTaskNames.map { "--exclude-task \"$it\"" })
         .plus(booleanParamsToOption.map { (param, option) -> if (param(this)) option else null })
         .plus(negativeBooleanParamsToOption.map { (param, option) -> if (!param(this)) option else null })
-        .plus(projectProperties.minus(excludedProjectProperties).flatMap { (key, value) -> listOf("--project-prop", "$key=$value") })
+        .plus(
+            projectProperties.minus(excludedProjectProperties)
+                .flatMap { (key, value) -> listOf("--project-prop", "$key=$value") })
         .plus(systemPropertiesArgs.flatMap { (key, value) -> listOf("--system-prop", "$key=$value") })
         .plus(logLevelToOption.firstOrNull { (level, _) -> logLevel == level }?.second)
         .plus(showStacktraceToOption.firstOrNull { (show, _) -> showStacktrace == show }?.second)
         .plus(consoleOutputToOption.firstOrNull { (console, _) -> consoleOutput == console }?.second ?: emptyList())
-        .plus(verificationModeToOption.firstOrNull { (verificationMode, _) -> dependencyVerificationMode == verificationMode }?.second ?: emptyList())
-        .plus(writeDependencyVerifications.joinToString(",").ifBlank { null }?.let { listOf(writeDependencyVerificationParam, it) } ?: emptyList())
+        .plus(
+            verificationModeToOption.firstOrNull { (verificationMode, _) -> dependencyVerificationMode == verificationMode }?.second
+                ?: emptyList()
+        )
+        .plus(
+            writeDependencyVerifications.joinToString(",")
+                .ifBlank { null }
+                ?.let { listOf(writeDependencyVerificationParam, it) } ?: emptyList())
         .filterNotNull()
 }
 
@@ -645,12 +664,20 @@ fun Gradle.uploadInitScripts(upload: Exec, execute: ExecuteOnRemoteTask, downloa
     }
 }
 
-class DownloadInParallelWorker @Inject constructor(val downloadInterval: Long) : Runnable {
-    override fun run() {
+
+internal interface DownloadInParallelActionParams : WorkParameters {
+    fun getDownloadInterval(): Property<Long>
+}
+
+internal abstract class DownloadInParallelAction @Inject constructor(
+    private val parameters: DownloadInParallelActionParams,
+) : WorkAction<DownloadInParallelActionParams> {
+
+    override fun execute() {
         val mustInterrupt = AtomicBoolean()
 
         gradle.addListener(object : TaskExecutionListener {
-            override fun afterExecute(task: Task, state: TaskState?) {
+            override fun afterExecute(task: Task, state: TaskState) {
                 if (task.name == "executeOnRemote") {
                     gradle.removeListener(this)
                     mustInterrupt.set(true)
@@ -662,7 +689,7 @@ class DownloadInParallelWorker @Inject constructor(val downloadInterval: Long) :
 
         while (!mustInterrupt.get()) {
             try {
-                Thread.sleep(downloadInterval)
+                Thread.sleep(parameters.getDownloadInterval().get())
                 downloadExecAction.execute()
             } catch (e: ExecException) {
                 println("Parallel download failed with exception $e")
@@ -684,7 +711,7 @@ class DownloadInParallelWorker @Inject constructor(val downloadInterval: Long) :
 * */
 fun mergeStartParamsWithProperties(
     startParameter: StartParameter,
-    gradlewRoot: File
+    gradlewRoot: File,
 ): StartParameter {
     fun addPropertiesToStartParams(properties: Map<String, String>, startParameter: StartParameter) {
         properties.onEach { (key, value) ->
