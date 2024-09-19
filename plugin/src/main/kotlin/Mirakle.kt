@@ -8,6 +8,7 @@ import org.gradle.api.Plugin
 import org.gradle.api.Task
 import org.gradle.api.artifacts.verification.DependencyVerificationMode
 import org.gradle.api.execution.TaskExecutionListener
+import org.gradle.api.initialization.Settings
 import org.gradle.api.invocation.Gradle
 import org.gradle.api.logging.LogLevel
 import org.gradle.api.logging.configuration.ConsoleOutput
@@ -32,31 +33,34 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 import javax.inject.Inject
 
-open class Mirakle : Plugin<Gradle> {
-    override fun apply(gradle: Gradle) {
-        gradle.rootProject { it.extensions.create("mirakle", MirakleExtension::class.java) }
+open class Mirakle : Plugin<Settings> {
+    override fun apply(target: Settings) {
+        target.extensions.create("mirakle", MirakleExtension::class.java)
 
-        if (gradle.startParameter.taskNames.isEmpty()) return
-        if (gradle.startParameter.projectProperties.containsKey(BUILD_ON_REMOTE)) return
-        if (gradle.startParameter.projectProperties.containsKey(FALLBACK)) return
-        if (gradle.startParameter.excludedTaskNames.remove("mirakle")) return
-        if (gradle.startParameter.isDryRun) return
+        val startParameter = target.gradle.startParameter
 
-        val gradlewRoot = findGradlewRoot(gradle.startParameter.currentDir)
+        if (startParameter.taskNames.isEmpty()) return
+        if (startParameter.projectProperties.containsKey(BUILD_ON_REMOTE)) return
+        if (startParameter.projectProperties.containsKey(FALLBACK)) return
+        if (startParameter.excludedTaskNames.remove("mirakle")) return
+        if (startParameter.isDryRun) return
+
+        val gradlewRoot = findGradlewRoot(startParameter.currentDir)
             ?: throw MirakleException("gradlew executable file is not found.")
 
-        if (loadProperties(File(gradlewRoot, "local.properties"))["mirakle.enabled"] == "false") return
-
-        gradle.assertNonSupportedFeatures()
+        val properties = loadProperties(File(gradlewRoot, "local.properties"))
+        if (properties["mirakle.enabled"] == "false") return
+        
+        startParameter.assertNonSupportedFeatures()
 
         val startTime = System.currentTimeMillis()
 
-        val startParamsCopy = gradle.startParameter.copy()
+        val startParamsCopy = startParameter.copy()
         val breakMode = startParamsCopy.projectProperties.let {
             (it[BREAK_MODE]?.toBoolean() ?: false) || (it[BREAK_TASK]?.isNotBlank() ?: false)
         }
 
-        gradle.startParameter.apply {
+        startParameter.apply {
             currentDir = gradlewRoot
             projectDir = gradlewRoot
 
@@ -74,47 +78,47 @@ open class Mirakle : Plugin<Gradle> {
                 val settingsFile = gradlewRoot.listFiles()?.firstOrNull { it.name.startsWith("settings.gradle") }
                 val settingsBackup = settingsFile?.let { File(gradlewRoot, "backup_${it.name}") }
 
-                val buildFile = gradlewRoot.listFiles()?.firstOrNull { it.name.startsWith("build.gradle") }
-                val buildFileBackup = buildFile?.let { File(gradlewRoot, "backup_${it.name}") }
+//                val buildFile = gradlewRoot.listFiles()?.firstOrNull { it.name.startsWith("build.gradle") }
+//                val buildFileBackup = buildFile?.let { File(gradlewRoot, "backup_${it.name}") }
 
-                val versionCatalog = File(gradlewRoot, "gradle").listFiles()?.filter {
-                    it.name.endsWith("versions.toml")
-                }
+//                val versionCatalog = File(gradlewRoot, "gradle").listFiles()?.filter {
+//                    it.name.endsWith("versions.toml")
+//                }
 
-                settingsFile?.renameTo(settingsBackup)
-                buildFile?.renameTo(buildFileBackup)
+//                settingsFile?.renameTo(settingsBackup)
+//                buildFile?.renameTo(buildFileBackup)
 
                 val emptySettings = settingsFile?.let {
                     // it makes Gradle stop looking for a settings.gradle file in parent dir
                     File(it.parentFile, "settings.gradle").apply { createNewFile() }
                 }
 
-                val versionCatalogBackup = versionCatalog?.map {
-                    val backup = File(it.parent, "${it.name}_backup")
-                    it.renameTo(backup)
-                    backup
-                }
+//                val versionCatalogBackup = versionCatalog?.map {
+//                    val backup = File(it.parent, "${it.name}_backup")
+//                    it.renameTo(backup)
+//                    backup
+//                }
 
-                gradle.afterMirakleEvaluate {
+                target.gradle.afterMirakleEvaluate {
                     emptySettings?.delete()
 
                     settingsFile?.let {
                         settingsBackup?.renameTo(it)
                     }
 
-                    buildFile?.let {
-                        buildFileBackup?.renameTo(it)
-                    }
+//                    buildFile?.let {
+//                        buildFileBackup?.renameTo(it)
+//                    }
 
-                    versionCatalogBackup?.zip(versionCatalog)?.forEach { (backup, original) ->
-                        backup.renameTo(original)
-                    }
+//                    versionCatalogBackup?.zip(versionCatalog)?.forEach { (backup, original) ->
+//                        backup.renameTo(original)
+//                    }
                 }
             }
 
             // mirakle.gradle is the only Gradle build file which is evaluated on local machine.
             if (File(gradlewRoot, "mirakle.gradle").exists()) {
-                gradle.rootProject { project ->
+                target.gradle.rootProject { project ->
                     project.apply(mutableMapOf("from" to "mirakle.gradle"))
                 }
             }
@@ -123,10 +127,11 @@ open class Mirakle : Plugin<Gradle> {
             isBuildScan = false
         }
 
-        gradle.rootProject { project ->
+        target.gradle.rootProject { project ->
             project.afterEvaluate {
                 val config = kotlin.run {
-                    val mirakleConfig = project.extensions.getByType(MirakleExtension::class.java)
+//                    val mirakleConfig = project.extensions.getByType(MirakleExtension::class.java)
+                    val mirakleConfig = target.extensions.getByType(MirakleExtension::class.java)
 
                     getMainframerConfigOrNull(gradlewRoot, mirakleConfig)?.also {
                         println("Mainframer config is applied, Mirakle config is ignored.")
@@ -141,7 +146,7 @@ open class Mirakle : Plugin<Gradle> {
                 val breakOnTasks = breakTaskFromCLI?.takeIf(String::isNotBlank)?.let(::listOf) ?: config.breakOnTasks
 
                 val upload = project.task<Exec>("uploadToRemote") {
-                    setCommandLine("rsync")
+                    setCommandLine("/usr/local/bin/rsync")
                     args(
                         fixPathForWindows(gradlewRoot.toString()),
                         "${config.host}:${config.remoteFolder}",
@@ -165,7 +170,7 @@ open class Mirakle : Plugin<Gradle> {
 
                     // disable remote stream modification since it breaks Idea and Android Studio test result processing
                     // https://github.com/Adambl4/mirakle/issues/83
-                    if (!gradle.containsIjTestInit()) {
+                    if (!target.gradle.containsIjTestInit()) {
                         standardOutput = modifyOutputStream(
                             standardOutput ?: System.out,
                             "${config.remoteFolder}/${gradlewRoot.name}",
@@ -180,7 +185,7 @@ open class Mirakle : Plugin<Gradle> {
                 }.mustRunAfter(upload) as ExecuteOnRemoteTask
 
                 val download = project.task<Exec>("downloadFromRemote") {
-                    setCommandLine("rsync")
+                    setCommandLine("/usr/local/bin/rsync")
                     args(
                         "${config.host}:${config.remoteFolder}/${gradlewRoot.name}/",
                         "./",
@@ -205,8 +210,10 @@ open class Mirakle : Plugin<Gradle> {
 
                             //It's impossible to pass this as serializable params to worker
                             //God forgive us
-                            DownloadInParallelAction.downloadExecAction = downloadExecAction
-                            DownloadInParallelAction.gradle = gradle
+                            DownloadInParallelAction.setDownloadInParallelActionParams(
+                                gradle = target.gradle,
+                                downloadExecAction = downloadExecAction,
+                            )
 
                             services.get(WorkerExecutor::class.java)
                                 .noIsolation()
@@ -223,7 +230,7 @@ open class Mirakle : Plugin<Gradle> {
                     downloadInParallel.mustRunAfter(upload)
                     download.mustRunAfter(downloadInParallel)
 
-                    gradle.startParameter.setTaskNames(listOf("downloadInParallel", "mirakle"))
+                    target.gradle.startParameter.setTaskNames(listOf("downloadInParallel", "mirakle"))
                 }
 
                 val mirakle = project.task("mirakle").dependsOn(upload, execute, download)
@@ -249,7 +256,7 @@ open class Mirakle : Plugin<Gradle> {
                             println("Upload to remote failed. Continuing with fallback.")
 
                             val connection = GradleConnector.newConnector()
-                                .forProjectDirectory(gradle.rootProject.projectDir)
+                                .forProjectDirectory(target.gradle.rootProject.projectDir)
                                 .connect()
 
                             connection.use { connection ->
@@ -278,7 +285,7 @@ open class Mirakle : Plugin<Gradle> {
                         throw MirakleException("Mirakle break mode doesn't work with download in parallel yet.")
                     }
 
-                    gradle.taskGraph.whenReady { taskGraph ->
+                    target.gradle.taskGraph.whenReady { taskGraph ->
                         val breakTaskPatterns = breakOnTasks.filter(String::isNotBlank).map(Pattern::compile)
 
                         val graphWithoutMirakle = taskGraph.allTasks.filterNot(Task::isMirakleTask)
@@ -353,7 +360,7 @@ open class Mirakle : Plugin<Gradle> {
                                 }
 
                                 mirakle.dependsOn(breakTask)
-                                gradle.logTasks(graphWithoutMirakle - tasksForRemoteExecution)
+                                target.gradle.logTasks(graphWithoutMirakle - tasksForRemoteExecution)
                             }
 
                             else -> {
@@ -362,7 +369,7 @@ open class Mirakle : Plugin<Gradle> {
                         }
                     }
                 } else {
-                    gradle.startParameter.apply {
+                    target.gradle.startParameter.apply {
                         if (taskNames.contains("downloadInParallel")) {
                             setTaskNames(listOf("downloadInParallel", "mirakle"))
                         } else {
@@ -372,10 +379,10 @@ open class Mirakle : Plugin<Gradle> {
                     }
                 }
 
-                gradle.uploadInitScripts(upload, execute, download)
+                target.gradle.uploadInitScripts(upload, execute, download)
 
-                gradle.logTasks(upload, execute, download)
-                gradle.logBuild(startTime, mirakle)
+                target.gradle.logTasks(upload, execute, download)
+                target.gradle.logBuild(startTime, mirakle)
             }
         }
     }
@@ -432,71 +439,17 @@ open class ExecuteOnRemoteTask : Exec() {
     }
 }
 
-class MirakleBreakMode : Mirakle() {
-    override fun apply(gradle: Gradle) {
-        gradle.startParameter.apply {
-            if (!projectProperties.containsKey(BREAK_MODE)) {
-                projectProperties = projectProperties.plus(BREAK_MODE to "true")
-            }
-        }
-        super.apply(gradle)
-    }
-}
-
-open class MirakleExtension {
-    var host: String? = null
-
-    var remoteFolder: String = "~/mirakle"
-
-    var excludeLocal = setOf(
-        "**/build"
-    )
-
-    var excludeRemote = setOf(
-        "**/src/"
-    )
-
-    var excludeCommon = setOf(
-        ".gradle",
-        ".idea",
-        "**/.git/",
-        "**/local.properties",
-        "**/mirakle.properties",
-        "**/mirakle_local.properties"
-    )
-
-    var rsyncToRemoteArgs = setOf(
-        "--archive",
-        "--delete"
-    )
-
-    var rsyncFromRemoteArgs = setOf(
-        "--archive",
-        "--delete"
-    )
-
-    var sshArgs = emptySet<String>()
-
-    var sshClient = "ssh"
-
-    var fallback = false
-
-    var downloadInParallel = false
-    var downloadInterval = 2000L
-
-    var breakOnTasks = emptySet<String>()
-
-    var remoteBashCommand: String? = null
-
-    internal fun buildRsyncToRemoteArgs(): Set<String> =
-        rsyncToRemoteArgs + excludeLocal.mapToRsyncExcludeArgs()
-
-    internal fun buildRsyncFromRemoteArgs(): Set<String> =
-        rsyncFromRemoteArgs + excludeRemote.mapToRsyncExcludeArgs()
-
-    private fun Set<String>.mapToRsyncExcludeArgs(): Set<String> =
-        this.plus(excludeCommon).map { "--exclude=$it" }.toSet()
-}
+// TODO: Migrate this, and add to gradle plugin
+//class MirakleBreakMode : Mirakle() {
+//    override fun apply(gradle: Gradle) {
+//        gradle.startParameter.apply {
+//            if (!projectProperties.containsKey(BREAK_MODE)) {
+//                projectProperties = projectProperties.plus(BREAK_MODE to "true")
+//            }
+//        }
+//        super.apply(gradle)
+//    }
+//}
 
 fun startParamsToArgs(params: StartParameter) = with(params) {
     emptyList<String>()
@@ -561,7 +514,7 @@ val consoleOutputToOption = listOf(
 )
 
 // related to gradle dependency verification
-// https://docs.gradle.org/current/userguide/dependency_verification.html
+// https://docs.target.gradle.org/current/userguide/dependency_verification.html
 val verificationModeToOption = listOf(
     //DependencyVerificationMode.STRICT to "--dependency-verification strict", //default, no need to pass
     DependencyVerificationMode.LENIENT to listOf("--dependency-verification", "lenient"),
@@ -698,8 +651,14 @@ internal abstract class DownloadInParallelAction @Inject constructor(
     }
 
     companion object {
-        lateinit var gradle: Gradle
-        lateinit var downloadExecAction: ExecAction
+        private lateinit var gradle: Gradle
+        private lateinit var downloadExecAction: ExecAction
+
+        @Deprecated("Need migrate this")
+        fun setDownloadInParallelActionParams(gradle: Gradle, downloadExecAction: ExecAction) {
+            this.gradle = gradle
+            this.downloadExecAction = downloadExecAction
+        }
     }
 }
 
@@ -707,7 +666,7 @@ internal abstract class DownloadInParallelAction @Inject constructor(
 * If an option is configured in multiple locations, the first one wins:
 *   1. mirakle.properties + mirakle_local.properties
 *   2. args from CLI
-*   3. GRADLE_USER_HOME/gradle.properties
+*   3. GRADLE_USER_HOME/target.gradle.properties
 * */
 fun mergeStartParamsWithProperties(
     startParameter: StartParameter,
@@ -725,7 +684,7 @@ fun mergeStartParamsWithProperties(
 
     val mirakleProperties = loadProperties(File(gradlewRoot, "mirakle.properties"))
     val mirakleLocalProperties = loadProperties(File(gradlewRoot, "mirakle_local.properties"))
-    val gradleHomeDirProperties = loadProperties(File(startParameter.gradleUserHomeDir, "gradle.properties"))
+    val gradleHomeDirProperties = loadProperties(File(startParameter.gradleUserHomeDir, "target.gradle.properties"))
 
     return startParameter.copy().apply {
         projectProperties = mutableMapOf()

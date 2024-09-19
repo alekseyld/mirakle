@@ -2,9 +2,9 @@
 import org.apache.tools.ant.taskdefs.condition.Os
 import org.gradle.BuildAdapter
 import org.gradle.BuildResult
-import org.gradle.api.GradleException
 import org.gradle.StartParameter
 import org.gradle.api.DefaultTask
+import org.gradle.api.GradleException
 import org.gradle.api.Project
 import org.gradle.api.Task
 import org.gradle.api.execution.TaskExecutionListener
@@ -13,7 +13,7 @@ import org.gradle.api.tasks.TaskState
 import org.gradle.internal.service.ServiceRegistry
 import java.io.File
 import java.lang.reflect.Field
-import java.util.*
+import java.util.Properties
 
 fun Gradle.logTasks(tasks: List<Task>) = logTasks(*tasks.toTypedArray())
 
@@ -51,9 +51,9 @@ fun Gradle.logBuild(startTime: Long, mirakle: Task) {
     }
 }
 
-fun Gradle.assertNonSupportedFeatures() {
-    if (startParameter.isContinuous) throw MirakleException("--continuous is not supported yet")
-    if (startParameter.includedBuilds.isNotEmpty()) throw MirakleException("Included builds is not supported yet")
+fun StartParameter.assertNonSupportedFeatures() {
+    if (isContinuous) throw MirakleException("--continuous is not supported yet")
+    if (includedBuilds.isNotEmpty()) throw MirakleException("Included builds is not supported yet")
 }
 
 private const val MS_PER_MINUTE: Long = 60000
